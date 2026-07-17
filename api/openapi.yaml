@@ -1,0 +1,95 @@
+openapi: 3.0.3
+info:
+  title: Metis Scheduler API
+  description: REST API voor de Metis Scheduler (Primavera alternatief).
+  version: 1.0.0-MVP
+servers:
+  - url: http://localhost:8080
+    description: Lokale server
+paths:
+  /projects/{id}/schedule:
+    post:
+      summary: Herbereken het schema (CPM) voor een project
+      description: Voert een forward en backward pass uit om vroege/late starttijden en float te berekenen.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Het ID van het project
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Succesvolle herberekening
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScheduleResult'
+  
+  /projects/{id}/critical-path:
+    get:
+      summary: Haal het kritieke pad op
+      description: Geeft een lijst van alle activiteiten terug die op het kritieke pad liggen (Total Float = 0).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Lijst met kritieke activiteiten
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Activity'
+
+components:
+  schemas:
+    Activity:
+      type: object
+      required:
+        - id
+        - name
+        - duration
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: "Fundering storten"
+        duration:
+          type: integer
+          description: "Duur van de activiteit"
+        early_start:
+          type: string
+          format: date-time
+        early_finish:
+          type: string
+          format: date-time
+        late_start:
+          type: string
+          format: date-time
+        late_finish:
+          type: string
+          format: date-time
+        total_float:
+          type: integer
+          description: "Speling in dezelfde eenheid als duration"
+        is_critical:
+          type: boolean
+          example: true
+
+    ScheduleResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+          example: "CPM succesvol berekend voor 42 activiteiten."

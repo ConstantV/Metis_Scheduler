@@ -1,0 +1,17 @@
+# Go binaries and packages
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Omggevingsvariabelen (voor als we later wachtwoorden verplaatsen)
+.env
+.env.local
+
+# VS Code & OS rommel
+.vscode/
+.DS_Store
+Thumbs.db
