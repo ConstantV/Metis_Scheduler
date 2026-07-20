@@ -13,8 +13,8 @@ import (
 func ConnectDB() *pgx.Conn {
 	// PAS DIT AAN: Vul hier jouw eigen Postgres gebruikersnaam en wachtwoord in!
 	// Structuur: postgres://GEBRUIKER:WACHTWOORD@localhost:5432/metis_scheduler
-	connStr := "postgres://postgres:wachtwoord@localhost:5432/metis_scheduler"
-
+	// Zonder wachtwoord laten we de 'wachtwoord' en de dubbele punt weg:
+	connStr := "postgres://constantverweij@localhost:5432/metis_scheduler"
 	// Als je een omgevingsvariabele gebruikt, pakken we die
 	if envUrl := os.Getenv("DATABASE_URL"); envUrl != "" {
 		connStr = envUrl

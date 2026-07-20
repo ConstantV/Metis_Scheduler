@@ -19,7 +19,7 @@ func main() {
 	defer dbConn.Close(context.Background())
 
 	// 2. Start de server
-	myServer := server.NewServer()
+	myServer := server.NewServer(dbConn)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {

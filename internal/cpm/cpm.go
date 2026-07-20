@@ -12,7 +12,7 @@ type Activity struct {
 	TotalFloat  int      `json:"total_float"`
 	IsCritical  bool     `json:"is_critical"`
 
-	// NIEUW: Status en de "Primavera-killer" vlag!
+	// Status en de "Primavera-killer" vlag!
 	Status       string `json:"status"`         // "NOT_STARTED", "IN_PROGRESS", "COMPLETED"
 	ReadyToStart bool   `json:"ready_to_start"` // Onze nieuwe vlag
 }
@@ -25,9 +25,11 @@ func CalculateSchedule(tasks []Activity) []Activity {
 	taskMap := make(map[string]*Activity)
 	for i := range tasks {
 		taskMap[tasks[i].ID] = &tasks[i]
+		// Reset kritieke vlag voor een schone berekening
+		tasks[i].IsCritical = false
 	}
 
-	// 1. Forward Pass
+	// 1. Forward Pass (Bereken vroege tijden)
 	projectDuration := 0
 	for i := range tasks {
 		calculateEarlyTimes(&tasks[i], taskMap)
@@ -36,13 +38,48 @@ func CalculateSchedule(tasks []Activity) []Activity {
 		}
 	}
 
-	// 2. Backward Pass
-	for i := range tasks {
-		tasks[i].LateFinish = projectDuration
-		tasks[i].LateStart = projectDuration - tasks[i].Duration
+	// 2. Backward Pass (Nu volledig recursief via opvolgers!)
+	// We bouwen een kaart: welke taken volgen er op deze taak?
+	successors := make(map[string][]string)
+	for _, t := range tasks {
+		for _, depID := range t.DependsOn {
+			successors[depID] = append(successors[depID], t.ID)
+		}
 	}
+
+	lateComputed := make(map[string]bool)
+	var computeLate func(id string)
+
+	computeLate = func(id string) {
+		// Als deze taak al berekend is in de recursie, sla hem over
+		if lateComputed[id] {
+			return
+		}
+		t := taskMap[id]
+		succIDs := successors[id]
+
+		if len(succIDs) == 0 {
+			// Als er geen opvolgers zijn, is het een eindtaak.
+			// LateFinish is dan gelijk aan de totale projectduur.
+			t.LateFinish = projectDuration
+		} else {
+			// Als er wel opvolgers zijn, is de LateFinish de ALLERKLEINSTE LateStart van zijn opvolgers!
+			minLateStart := projectDuration
+			for _, succID := range succIDs {
+				computeLate(succID) // Zorg dat de opvolger éérst berekend is!
+				if taskMap[succID].LateStart < minLateStart {
+					minLateStart = taskMap[succID].LateStart
+				}
+			}
+			t.LateFinish = minLateStart
+		}
+		t.LateStart = t.LateFinish - t.Duration
+		lateComputed[id] = true
+	}
+
+	// Voer de backward pass uit voor alle taken
 	for i := range tasks {
-		calculateLateTimes(&tasks[i], taskMap)
+		computeLate(tasks[i].ID)
 	}
 
 	// 3. Float & Critical Path
@@ -53,18 +90,12 @@ func CalculateSchedule(tasks []Activity) []Activity {
 		}
 	}
 
-	// 4. NIEUW: BEREKEN "READY TO START"
+	// 4. BEREKEN "READY TO START"
 	for i := range tasks {
-		// Als de status leeg is, gaan we ervan uit dat hij nog niet gestart is
 		if tasks[i].Status == "" {
 			tasks[i].Status = "NOT_STARTED"
 		}
 
-		if tasks[i].Status != "NOT_STARTED" {
-			tasks[i].ReadyToStart = false
-			continue
-		}
-		// Als een taak al gestart of klaar is, hoeft hij niet meer te starten
 		if tasks[i].Status != "NOT_STARTED" {
 			tasks[i].ReadyToStart = false
 			continue
@@ -75,10 +106,9 @@ func CalculateSchedule(tasks []Activity) []Activity {
 		// Check alle voorgangers
 		for _, depID := range tasks[i].DependsOn {
 			depTask, exists := taskMap[depID]
-			// Als de voorganger bestaat en NIET op COMPLETED staat, is deze taak geblokkeerd
 			if exists && depTask.Status != "COMPLETED" {
 				allPredecessorsCompleted = false
-				break // We weten genoeg, stop deze sub-loop
+				break
 			}
 		}
 
@@ -88,7 +118,6 @@ func CalculateSchedule(tasks []Activity) []Activity {
 	return tasks
 }
 
-// (De hulpfuncties calculateEarlyTimes en calculateLateTimes blijven ongewijzigd hieronder staan)
 func calculateEarlyTimes(task *Activity, taskMap map[string]*Activity) {
 	if len(task.DependsOn) == 0 {
 		task.EarlyStart = 0
@@ -109,16 +138,4 @@ func calculateEarlyTimes(task *Activity, taskMap map[string]*Activity) {
 	}
 	task.EarlyStart = maxDependencyFinish
 	task.EarlyFinish = task.EarlyStart + task.Duration
-}
-
-func calculateLateTimes(task *Activity, taskMap map[string]*Activity) {
-	for _, depID := range task.DependsOn {
-		depTask, exists := taskMap[depID]
-		if exists {
-			if task.LateStart < depTask.LateFinish {
-				depTask.LateFinish = task.LateStart
-				depTask.LateStart = depTask.LateFinish - depTask.Duration
-			}
-		}
-	}
 }

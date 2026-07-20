@@ -7,64 +7,131 @@ import (
 	"metis-scheduler/internal/cpm"
 )
 
-type Server struct{}
-
-func NewServer() *Server {
-	return &Server{}
-}
-
-// Zorg ervoor dat hier de 'Status' velden exact zo bij staan!
-func getMockProject() []cpm.Activity {
-	return []cpm.Activity{
-		// Hoofd-startpunt (Al voltooid)
-		{ID: "task-1", Name: "Ontwerp & Vergunning", Duration: 5, Status: "COMPLETED", DependsOn: []string{}},
-
-		// Fundering is nu in uitvoering (Niet voltooid!)
-		{ID: "task-2", Name: "Grondwerk & Fundering", Duration: 4, Status: "IN_PROGRESS", DependsOn: []string{"task-1"}},
-
-		// Parallel Pad A: Wacht op fundering
-		{ID: "task-3", Name: "Ruwbouw Kring A", Duration: 6, Status: "NOT_STARTED", DependsOn: []string{"task-2"}},
-
-		// Parallel Pad B: Wacht op fundering (Duurt langer, dus kritiek!)
-		{ID: "task-4", Name: "Ruwbouw Kring B", Duration: 8, Status: "NOT_STARTED", DependsOn: []string{"task-2"}},
-
-		// Parallel Pad C: Onafhankelijk van de fundering. De aanvraag is al gedaan!
-		{ID: "task-5", Name: "Nutsnet Aanvragen", Duration: 2, Status: "COMPLETED", DependsOn: []string{"task-1"}},
-
-		// Deze taak wacht op de aanvraag (task-5). Omdat task-5 COMPLETED is, MOET deze vlag op TRUE springen!
-		{ID: "task-6", Name: "Nutsleidingen Leggen", Duration: 3, Status: "NOT_STARTED", DependsOn: []string{"task-5"}},
-
-		// Merge Point 1: Wacht tot BEIDE ruwbouw-kringen (task-3 en task-4) klaar zijn
-		{ID: "task-7", Name: "Afwerking & Interieur", Duration: 5, Status: "NOT_STARTED", DependsOn: []string{"task-3", "task-4"}},
-
-		// Eindstation: Wacht op de afwerking en de nutsleidingen
-		{ID: "task-8", Name: "Oplevering & Inspectie", Duration: 2, Status: "NOT_STARTED", DependsOn: []string{"task-7", "task-6"}},
-	}
-}
-
-// HandleSchedule berekent de volledige planning
+// HandleSchedule haalt data uit de DB, berekent de CPM, slaat het op en geeft antwoord
 func (s *Server) HandleSchedule(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	projectID := r.PathValue("id")
+	if projectID == "" {
+		http.Error(w, "Project ID is verplicht", http.StatusBadRequest)
+		return
+	}
 
-	tasks := getMockProject()
-	calculatedSchedule := cpm.CalculateSchedule(tasks)
+	// 1. Haal alle taken op voor dit project uit de DB
+	rows, err := s.db.Query(ctx,
+		"SELECT id, name, duration, status FROM tasks WHERE project_id = $1",
+		projectID,
+	)
+	if err != nil {
+		http.Error(w, "Fout bij ophalen taken: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
 
-	json.NewEncoder(w).Encode(calculatedSchedule)
-}
+	var tasks []cpm.Activity
+	taskMap := make(map[string]*cpm.Activity)
 
-// HandleCriticalPath filtert alleen de taken die kritiek zijn eruit!
-func (s *Server) HandleCriticalPath(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	for rows.Next() {
+		var t cpm.Activity
+		if err := rows.Scan(&t.ID, &t.Name, &t.Duration, &t.Status); err != nil {
+			http.Error(w, "Fout bij scannen taak: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		t.DependsOn = []string{} // Initialiseer lege slice
+		tasks = append(tasks, t)
+	}
 
-	tasks := getMockProject()
-	calculatedSchedule := cpm.CalculateSchedule(tasks)
+	// Zet in een map voor snelle referentie bij het koppelen van dependencies
+	for i := range tasks {
+		taskMap[tasks[i].ID] = &tasks[i]
+	}
 
-	var criticalTasks []cpm.Activity
-	for _, task := range calculatedSchedule {
-		if task.IsCritical {
-			criticalTasks = append(criticalTasks, task)
+	// 2. Haal de relaties (dependencies) op uit de DB en koppel ze aan de taken
+	depRows, err := s.db.Query(ctx,
+		"SELECT task_id, predecessor_id FROM task_dependencies WHERE project_id = $1",
+		projectID,
+	)
+	if err != nil {
+		http.Error(w, "Fout bij ophalen relaties: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer depRows.Close()
+
+	for depRows.Next() {
+		var taskID, predID string
+		if err := depRows.Scan(&taskID, &predID); err != nil {
+			http.Error(w, "Fout bij scannen relatie: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if task, exists := taskMap[taskID]; exists {
+			task.DependsOn = append(task.DependsOn, predID)
 		}
 	}
 
+	if len(tasks) == 0 {
+		http.Error(w, "Geen taken gevonden in de database voor dit project UUID", http.StatusNotFound)
+		return
+	}
+
+	// 3. Voer de CPM berekening uit via de engine
+	calculatedTasks := cpm.CalculateSchedule(tasks)
+
+	// 4. Sla de berekende resultaten op in de database
+	for _, t := range calculatedTasks {
+		_, err := s.db.Exec(ctx, `
+			UPDATE tasks 
+			SET early_start = $1, early_finish = $2, late_start = $3, late_finish = $4, total_float = $5, ready_to_start = $6
+			WHERE project_id = $7 AND id = $8`,
+			t.EarlyStart, t.EarlyFinish, t.LateStart, t.LateFinish, t.TotalFloat, t.ReadyToStart,
+			projectID, t.ID,
+		)
+		if err != nil {
+			http.Error(w, "Fout bij opslaan rekenresultaten: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// 5. Geef de berekende planning terug als JSON response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(calculatedTasks)
+}
+
+// HandleCriticalPath haalt direct de kritieke taken op uit de database
+func (s *Server) HandleCriticalPath(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	projectID := r.PathValue("id")
+	if projectID == "" {
+		http.Error(w, "Project ID is verplicht", http.StatusBadRequest)
+		return
+	}
+
+	// Taken op het kritieke pad hebben een TotalFloat van 0
+	rows, err := s.db.Query(ctx, `
+		SELECT id, name, duration, status, early_start, early_finish, late_start, late_finish, total_float, ready_to_start 
+		FROM tasks 
+		WHERE project_id = $1 AND total_float = 0`,
+		projectID,
+	)
+	if err != nil {
+		http.Error(w, "Fout bij ophalen kritieke pad: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var criticalTasks []cpm.Activity
+	for rows.Next() {
+		var t cpm.Activity
+		err := rows.Scan(
+			&t.ID, &t.Name, &t.Duration, &t.Status,
+			&t.EarlyStart, &t.EarlyFinish, &t.LateStart, &t.LateFinish,
+			&t.TotalFloat, &t.ReadyToStart,
+		)
+		if err != nil {
+			http.Error(w, "Fout bij scannen kritieke taak: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		criticalTasks = append(criticalTasks, t)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(criticalTasks)
 }
